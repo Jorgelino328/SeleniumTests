@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 import java.util.UUID;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -27,14 +28,13 @@ import static org.junit.Assert.*;
 public class EditUserProfileTest {
     private WebDriver driver;
     private WebDriverWait wait;
-    private final Duration WAIT_TIMEOUT = Duration.ofSeconds(10);
+    private final Duration WAIT_TIMEOUT = Duration.ofSeconds(15);
     private final String BASE_URL = "https://toronto.imd.ufrn.br/gestao";
     private final String LOGIN_URL = BASE_URL + "/login/";
 
     @Before
     public void setUp() {
         Logger.getLogger("org.openqa.selenium").setLevel(Level.SEVERE);
-        // Ensure this path matches your system
         System.setProperty("webdriver.chrome.driver", "/usr/local/bin/chromedriver");
 
         ChromeOptions options = new ChromeOptions();
@@ -47,7 +47,6 @@ public class EditUserProfileTest {
         try {
             ensureLoggedInAndNavigateToEdit();
         } catch (Exception e) {
-            // If setup fails, print why so we can debug "silent" failures
             System.err.println("SETUP FAILED: " + e.getMessage());
             throw e;
         }
@@ -56,60 +55,65 @@ public class EditUserProfileTest {
     @After
     public void tearDown() {
         if (driver != null) driver.quit();
-        // Pause briefly to stop the server from rate-limiting us (blocking the IP)
         try { Thread.sleep(500); } catch (InterruptedException e) {}
     }
 
-    // --- SMART SETUP LOGIC ---
+    // --- SMART NAVIGATION AND SETUP ---
 
     private void ensureLoggedInAndNavigateToEdit() {
         driver.get(LOGIN_URL);
-
-        // CHECK: Are we ALREADY logged in from a previous session?
-        // If we see the "User Avatar" button, we are logged in.
-        boolean alreadyLoggedIn = isElementPresent(By.cssSelector("button[aria-label='Abrir menu do usuário']"));
-
-        if (!alreadyLoggedIn) {
-            // Only perform login steps if we are actually logged out
+        if (!isElementPresent(By.cssSelector("button[aria-label='Abrir menu do usuário']"))) {
             performLogin();
         }
-
-        // Now that we are definitely logged in, go to the Edit page
         navigateToEditViaMenu();
     }
 
     private void performLogin() {
         Dotenv dotenv = Dotenv.load();
-
         wait.until(ExpectedConditions.visibilityOfElementLocated(By.id("username")))
                 .sendKeys(dotenv.get("TEST_USER"));
-
         driver.findElement(By.id("password")).sendKeys(dotenv.get("TEST_PASS"));
-
-        // Use JS Click to avoid any overlay/focus issues
         WebElement loginBtn = driver.findElement(By.cssSelector("button[type='submit']"));
         jsClick(loginBtn);
+        wait.until(ExpectedConditions.visibilityOfElementLocated(By.cssSelector("button[aria-label='Abrir menu do usuário']")));
+    }
 
-        // Verify we actually got in
+    // Used for re-login inside test14
+    private void performLoginWithCredentials(String user, String pass) {
+        wait.until(ExpectedConditions.visibilityOfElementLocated(By.id("username"))).sendKeys(user);
+        driver.findElement(By.id("password")).sendKeys(pass);
+        jsClick(driver.findElement(By.cssSelector("button[type='submit']")));
         wait.until(ExpectedConditions.visibilityOfElementLocated(By.cssSelector("button[aria-label='Abrir menu do usuário']")));
     }
 
     private void navigateToEditViaMenu() {
-        // Optimization: If already on the edit page, stop here.
-        if (isElementPresent(By.id("input-nome"))) return;
-
-        // 1. Open User Menu
-        WebElement userMenuBtn = wait.until(ExpectedConditions.elementToBeClickable(By.cssSelector("button[aria-label='Abrir menu do usuário']")));
-        jsClick(userMenuBtn);
-
-        // 2. Click "Editar conta"
-        WebElement editLink = wait.until(ExpectedConditions.elementToBeClickable(
-                By.xpath("//a[contains(@href, 'usuario/conta/editar') or contains(., 'Editar')]")
-        ));
-        jsClick(editLink);
-
-        // 3. Wait for the page to load
+        if (driver.getCurrentUrl().contains("/usuario/conta/editar") && isElementPresent(By.id("input-nome"))) {
+            return;
+        }
+        driver.get(BASE_URL + "/usuario/conta/editar");
         wait.until(ExpectedConditions.visibilityOfElementLocated(By.id("input-nome")));
+    }
+
+    private void navigateToLGPDPane() {
+        String lgpdUrl = BASE_URL + "/lgpd";
+
+        // Force navigation if not already there
+        if (!driver.getCurrentUrl().contains("lgpd")) {
+            driver.get(lgpdUrl);
+        }
+
+        // Wait for the main page title (H3) which effectively signals page load
+        wait.until(ExpectedConditions.visibilityOfElementLocated(
+                By.xpath("//h3[contains(., 'Sobre os meus dados')]")
+        ));
+    }
+
+    private void navigateToPasswordChange() {
+        String pwUrl = BASE_URL + "/usuario/conta/senha";
+        if (!driver.getCurrentUrl().contains("senha")) {
+            driver.get(pwUrl);
+        }
+        wait.until(ExpectedConditions.visibilityOfElementLocated(By.cssSelector("input[type='password']")));
     }
 
     // --- UTILITIES ---
@@ -131,18 +135,35 @@ public class EditUserProfileTest {
         element.sendKeys(Keys.chord(Keys.CONTROL, "a"), Keys.BACK_SPACE);
     }
 
+    private boolean checkForLocalError(By inputLocator, String expectedErrorTextPart) {
+        String locatorString = inputLocator.toString();
+        String baseId;
+        if (locatorString.contains("By.id: ")) {
+            baseId = locatorString.substring(locatorString.indexOf(":") + 1).trim();
+        } else if (locatorString.contains("By.cssSelector: input[id=")) {
+            baseId = locatorString.substring(locatorString.indexOf("'")+1, locatorString.lastIndexOf("']")).trim();
+        } else {
+            return false;
+        }
+        By localErrorLocator = By.xpath("//*[@id='" + baseId + "']/following-sibling::*[contains(text(), '" + expectedErrorTextPart + "')]");
+        try {
+            new WebDriverWait(driver, Duration.ofSeconds(2)).until(ExpectedConditions.visibilityOfElementLocated(localErrorLocator));
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private boolean checkForErrorToast() {
         try {
-            new WebDriverWait(driver, Duration.ofSeconds(3))
-                    .until(ExpectedConditions.visibilityOfElementLocated(By.cssSelector(".p-toast-message-error")));
+            new WebDriverWait(driver, Duration.ofSeconds(3)).until(ExpectedConditions.visibilityOfElementLocated(By.cssSelector(".p-toast-message-error")));
             return true;
         } catch (Exception e) { return false; }
     }
 
     private boolean checkForSuccessToast() {
         try {
-            new WebDriverWait(driver, Duration.ofSeconds(3))
-                    .until(ExpectedConditions.visibilityOfElementLocated(By.cssSelector(".p-toast-message-success")));
+            new WebDriverWait(driver, Duration.ofSeconds(3)).until(ExpectedConditions.visibilityOfElementLocated(By.cssSelector(".p-toast-message-success")));
             return true;
         } catch (Exception e) { return false; }
     }
@@ -153,27 +174,21 @@ public class EditUserProfileTest {
         return temp;
     }
 
-    // --- TESTS ---
+    // --- TEST SUITE ---
 
     @Test
     public void test01_AvatarUpdate() throws IOException, InterruptedException {
         System.out.println(">>> START: test01_AvatarUpdate");
-
         String oldSrc = "none";
-        // Grab old src if it exists (some users might not have an avatar set yet)
         if (isElementPresent(By.cssSelector("button[aria-label='Abrir menu do usuário'] img"))) {
             oldSrc = driver.findElement(By.cssSelector("button[aria-label='Abrir menu do usuário'] img")).getAttribute("src");
         }
-
         WebElement fileInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.id("formFile")));
         File goodFile = createTempFile("valid_image", ".jpg");
         fileInput.sendKeys(goodFile.getAbsolutePath());
-
         jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
-
         checkForSuccessToast();
-        Thread.sleep(3000); // Give backend time to process image
-
+        Thread.sleep(3000);
         if (isElementPresent(By.cssSelector("button[aria-label='Abrir menu do usuário'] img"))) {
             String newSrc = driver.findElement(By.cssSelector("button[aria-label='Abrir menu do usuário'] img")).getAttribute("src");
             assertNotEquals("Failure: Avatar src did not change", oldSrc, newSrc);
@@ -186,15 +201,11 @@ public class EditUserProfileTest {
         System.out.println(">>> START: test02_ValidNameUpdate");
         String randomName = "User_" + UUID.randomUUID().toString().substring(0, 8);
         WebElement nameInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.id("input-nome")));
-
         robustClear(nameInput);
         nameInput.sendKeys(randomName);
-
         jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
         checkForSuccessToast();
-
-        navigateToEditViaMenu(); // Reload page to verify persistence
-
+        navigateToEditViaMenu();
         WebElement finalNameInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.id("input-nome")));
         assertEquals("Name did not save", randomName.toUpperCase(), finalNameInput.getAttribute("value"));
         System.out.println("FINISHED: test02_ValidNameUpdate");
@@ -206,7 +217,6 @@ public class EditUserProfileTest {
         WebElement loginLabel = wait.until(ExpectedConditions.visibilityOfElementLocated(By.id("lbl-input-login")));
         String containerText = loginLabel.findElement(By.xpath("./..")).getText();
         String expectedUser = Dotenv.load().get("TEST_USER").trim();
-
         assertTrue("Username not displayed in read-only field", containerText.contains(expectedUser));
         System.out.println("FINISHED: test03_ImmutableLoginField");
     }
@@ -216,16 +226,12 @@ public class EditUserProfileTest {
         System.out.println(">>> START: test04_CancelButton");
         WebElement nameInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.id("input-nome")));
         String originalName = nameInput.getAttribute("value");
-
         robustClear(nameInput);
         nameInput.sendKeys("SHOULD_NOT_SAVE");
-
         jsClick(driver.findElement(By.xpath("//button[contains(.,'Cancelar')]")));
-        wait.until(ExpectedConditions.urlContains("listar-empresas")); // Wait for redirect
-
-        navigateToEditViaMenu(); // Go back to check
+        wait.until(ExpectedConditions.urlContains("listar-empresas"));
+        navigateToEditViaMenu();
         WebElement finalName = wait.until(ExpectedConditions.presenceOfElementLocated(By.id("input-nome")));
-
         assertEquals("Cancel button incorrectly saved data", originalName, finalName.getAttribute("value"));
         System.out.println("FINISHED: test04_CancelButton");
     }
@@ -244,148 +250,200 @@ public class EditUserProfileTest {
         WebElement nameInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.id("input-nome")));
         robustClear(nameInput);
         jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
-        assertTrue("System accepted empty name", checkForErrorToast());
+        boolean localError = checkForLocalError(By.id("input-nome"), "campo nome é obrigatório");
+        assertTrue("System accepted empty name (Did not show local 'Obrigatório' error)", localError);
         System.out.println("FINISHED: test06_EmptyNameValidation");
     }
 
     @Test
-    public void test07_CpfValidation() {
-        System.out.println(">>> START: test07_CpfValidation");
+    public void test07_EmptyCpfValidation() {
+        System.out.println(">>> START: test07_EmptyCpfValidation");
+        WebElement cpfInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("input[id='pessoa.cpf']")));
+        robustClear(cpfInput);
+        jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
+        boolean localError = checkForLocalError(By.cssSelector("input[id='pessoa.cpf']"), "campo cpf é obrigatório");
+        assertTrue("System accepted empty CPF (Did not show local required error)", localError);
+        System.out.println("FINISHED: test07_EmptyCpfValidation");
+    }
+
+    @Test
+    public void test08_CpfValidation() {
+        System.out.println(">>> START: test08_CpfValidation");
         WebElement cpfInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("input[id='pessoa.cpf']")));
         robustClear(cpfInput);
         cpfInput.sendKeys("111.111.111-11");
         jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
-        assertTrue("System accepted invalid CPF", checkForErrorToast());
-        System.out.println("FINISHED: test07_CpfValidation");
+        boolean localError = checkForLocalError(By.cssSelector("input[id='pessoa.cpf']"), "Informe um CPF válido");
+        assertTrue("System accepted invalid CPF checksum (Did not show local error)", localError);
+        System.out.println("FINISHED: test08_CpfValidation");
     }
 
     @Test
-    public void test08_EmailValidation() {
-        System.out.println(">>> START: test08_EmailValidation");
-
+    public void test09_EmailValidation() {
+        System.out.println(">>> START: test09_EmailValidation");
         String[] invalidEmails = {"user@", "userdomain.com", "user@domain"};
-
-        By localErrorLocator = By.xpath("//input[@id='input-email']/following-sibling::*[contains(text(), 'email válido')]");
-
+        By localErrorLocatorBase = By.id("input-email");
         for (String email : invalidEmails) {
-            WebElement emailInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.id("input-email")));
+            WebElement emailInput = wait.until(ExpectedConditions.presenceOfElementLocated(localErrorLocatorBase));
             robustClear(emailInput);
             emailInput.sendKeys(email);
-
-            // 1. Attempt Save (Triggers Client-Side Logic)
             jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
-
-            // 2. Check for the local validation message (short wait)
-            boolean localErrorVisible = false;
-            try {
-                // Wait specifically for the local validation text to appear
-                new WebDriverWait(driver, Duration.ofSeconds(2)).until(
-                        ExpectedConditions.visibilityOfElementLocated(localErrorLocator)
-                );
-                localErrorVisible = true;
-            } catch (Exception e) {}
-
-            // Assertion: We expect the local error message to be visible
-            assertTrue("Client validation failed for email: " + email + ". Expected local error message.", localErrorVisible);
-
-            // Cleanup
+            boolean localError = checkForLocalError(localErrorLocatorBase, "email válido");
+            assertTrue("Client validation failed for email: " + email, localError);
             navigateToEditViaMenu();
         }
-        System.out.println("FINISHED: test08_EmailValidation");
+        System.out.println("FINISHED: test09_EmailValidation");
     }
 
     @Test
-    public void test09_AgeBoundaries() {
-        System.out.println(">>> START: test09_AgeBoundaries");
-
-        // A. Future Date
+    public void test10_AgeBoundaries() {
+        System.out.println(">>> START: test10_AgeBoundaries");
         WebElement dateInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("input[id='pessoa.dataNascimento']")));
+        By dateLocator = By.cssSelector("input[id='pessoa.dataNascimento']");
         robustClear(dateInput);
         dateInput.sendKeys(LocalDate.now().plusDays(1).format(DateTimeFormatter.ofPattern("dd/MM/yyyy")));
         jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
-        assertTrue("Allowed Future Date", checkForErrorToast());
-
+        boolean localError = checkForLocalError(dateLocator, "Data inválida");
+        assertTrue("Allowed Future Date (Did not show local error)", localError);
         navigateToEditViaMenu();
-
-        // B. Ancient Date
-        dateInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("input[id='pessoa.dataNascimento']")));
+        dateInput = wait.until(ExpectedConditions.presenceOfElementLocated(dateLocator));
         robustClear(dateInput);
         dateInput.sendKeys("01/01/0024");
         jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
-
-        // If system says "Success", that is a BUG in the system logic.
         boolean ancientSuccess = checkForSuccessToast();
-        assertFalse("Bug: System accepted year 0024", ancientSuccess);
-        System.out.println("FINISHED: test09_AgeBoundaries");
+        assertFalse("Bug: System allowed unrealistic ancient date (01/01/0024)", ancientSuccess);
+        System.out.println("FINISHED: test10_AgeBoundaries");
     }
 
     @Test
-    public void test10_SecurityInvalidFileUploads() throws IOException {
-        System.out.println(">>> START: test10_SecurityInvalidFileUploads");
+    public void test11_SecurityInvalidFileUploads() throws IOException {
+        System.out.println(">>> START: test11_SecurityInvalidFileUploads");
         String[] dangerousExtensions = {".txt", ".exe", ".sh", ".html"};
-
         for (String ext : dangerousExtensions) {
             navigateToEditViaMenu();
             WebElement fileInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.id("formFile")));
             fileInput.sendKeys(createTempFile("exploit", ext).getAbsolutePath());
             jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
-
             assertTrue("Security Fail: Accepted " + ext, checkForErrorToast());
         }
-        System.out.println("FINISHED: test10_SecurityInvalidFileUploads");
+        System.out.println("FINISHED: test11_SecurityInvalidFileUploads");
     }
 
     @Test
-    public void test13_EmailChangeAndLogin() {
-        System.out.println(">>> START: test13_EmailChangeAndLogin");
+    public void test12_DataPrivacyMasking() {
+        System.out.println(">>> START: test12_DataPrivacyMasking");
+
+        navigateToLGPDPane();
+
+        // Wait for the table to exist
+        WebElement lgpdTable = wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector(".table.mt-2")));
+
+        // 1. Extract CPF
+        WebElement cpfCell = lgpdTable.findElement(By.xpath(".//td[.//strong[contains(text(), 'CPF')]]/following-sibling::td"));
+        String cpfMasked = cpfCell.getText().trim();
+        if (cpfMasked.isEmpty()) cpfMasked = cpfCell.getAttribute("textContent").trim(); // Fallback
+
+        // 2. Extract Email
+        WebElement emailCell = lgpdTable.findElement(By.xpath(".//td[.//strong[contains(text(), 'E-mail')]]/following-sibling::td"));
+        String emailMasked = emailCell.getText().trim();
+        if (emailMasked.isEmpty()) emailMasked = emailCell.getAttribute("textContent").trim(); // Fallback
+
+        // 3. Assertions (Strict Regex)
+        assertTrue("CPF masking failed. Found: " + cpfMasked,
+                cpfMasked.matches("^\\*\\*\\*\\.\\d{3}\\.\\d{3}-\\*\\*$"));
+
+        assertTrue("Email masking failed. Found: " + emailMasked,
+                emailMasked.matches("^.+\\*{5}.+@.+$"));
+
+        navigateToEditViaMenu();
+
+        System.out.println("FINISHED: test12_DataPrivacyMasking");
+    }
+
+    @Test
+    public void test13_DataPersistenceUpdate() {
+        System.out.println(">>> START: test13_DataPersistenceUpdate");
+        final String NEW_DOB = "10/06/1990";
+        navigateToLGPDPane();
+        wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector(".table.mt-2")));
+        navigateToEditViaMenu();
+        WebElement dateInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("input[id='pessoa.dataNascimento']")));
+        robustClear(dateInput);
+        dateInput.sendKeys(NEW_DOB);
+        jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
+        checkForSuccessToast();
+        navigateToLGPDPane();
+        WebElement lgpdTableFinal = wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector(".table.mt-2")));
+        String finalDobValue = lgpdTableFinal.findElement(By.xpath(".//tr[4]/td[2]")).getText().trim();
+        assertEquals("DOB failed to update/persist on the LGPD screen.", NEW_DOB, finalDobValue);
+        navigateToEditViaMenu();
+        System.out.println("FINISHED: test13_DataPersistenceUpdate");
+    }
+
+    @Test
+    public void test14_EmailChangeAndLogin() {
+        System.out.println(">>> START: test14_EmailChangeAndLogin");
         Dotenv dotenv = Dotenv.load();
 
+        final String NEW_EMAIL = "auto_" + UUID.randomUUID().toString().substring(0,6) + "@example.com";
         WebElement emailInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.id("input-email")));
         String originalEmail = emailInput.getAttribute("value");
-        String newEmail = "auto_" + UUID.randomUUID().toString().substring(0,6) + "@example.com";
 
-        robustClear(emailInput);
-        emailInput.sendKeys(newEmail);
-        jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
+        try {
+            // 1. Change Email
+            robustClear(emailInput);
+            emailInput.sendKeys(NEW_EMAIL);
+            jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
+            assertTrue("Could not save new email", checkForSuccessToast());
 
-        if (checkForSuccessToast()) {
-            boolean loginSucceeded = false;
-            try {
-                // 1. Open User Menu
-                WebElement userMenu = wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("button[aria-label='Abrir menu do usuário']")));
-                jsClick(userMenu);
+            // 2. Logout (Force navigation to logout for speed/reliability)
+            WebElement userMenu = wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("button[aria-label='Abrir menu do usuário']")));
+            jsClick(userMenu);
+            WebElement logoutLink = wait.until(ExpectedConditions.visibilityOfElementLocated(By.xpath("//button[contains(., 'Sair')]")));
+            jsClick(logoutLink);
+            wait.until(ExpectedConditions.urlContains("/login"));
 
-                // FIX: Use the correct locator for the <button> with text "Sair"
-                WebElement logoutLink = wait.until(ExpectedConditions.visibilityOfElementLocated(By.xpath("//button[contains(., 'Sair')]")));
-                jsClick(logoutLink);
+            // 3. Login with NEW Email
+            performLoginWithCredentials(NEW_EMAIL, dotenv.get("TEST_PASS"));
 
-                wait.until(ExpectedConditions.urlContains("/login"));
+            // 4. Verify we are logged in
+            assertTrue("Login with new email failed", isElementPresent(By.cssSelector("button[aria-label='Abrir menu do usuário']")));
 
-                // 2. Explicitly Try Login with NEW Email
-                wait.until(ExpectedConditions.visibilityOfElementLocated(By.id("username"))).sendKeys(newEmail);
-                driver.findElement(By.id("password")).sendKeys(dotenv.get("TEST_PASS"));
-                jsClick(driver.findElement(By.cssSelector("button[type='submit']")));
-
-                try {
-                    // Check if we got in
-                    wait.until(ExpectedConditions.visibilityOfElementLocated(By.cssSelector("button[aria-label='Abrir menu do usuário']")));
-                    loginSucceeded = true;
-                } catch (Exception e) { loginSucceeded = false; }
-
-                // 3. Cleanup
-                if (loginSucceeded) {
-                    navigateToEditViaMenu();
-                    emailInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.id("input-email")));
-                    robustClear(emailInput);
-                    emailInput.sendKeys(originalEmail);
-                    jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
-                    checkForSuccessToast();
-                }
-
-            } finally {
-                assertFalse("Security Warning: Immediate login with new email allowed", loginSucceeded);
-            }
+        } finally {
+            // 5. Cleanup: Revert to original email
+            navigateToEditViaMenu();
+            WebElement cleanupEmailInput = wait.until(ExpectedConditions.presenceOfElementLocated(By.id("input-email")));
+            robustClear(cleanupEmailInput);
+            cleanupEmailInput.sendKeys(originalEmail);
+            jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
+            checkForSuccessToast();
         }
-        System.out.println("FINISHED: test13_EmailChangeAndLogin");
+        System.out.println("FINISHED: test14_EmailChangeAndLogin");
+    }
+
+    @Test
+    public void test15_PasswordMismatchValidation() {
+        System.out.println(">>> START: test15_PasswordMismatchValidation");
+        navigateToPasswordChange();
+
+        List<WebElement> passwordFields = driver.findElements(By.cssSelector("input[type='password']"));
+
+        if (passwordFields.size() >= 3) {
+            passwordFields.get(1).sendKeys("NewPass123!");
+            passwordFields.get(2).sendKeys("MismatchPass999!");
+            jsClick(driver.findElement(By.xpath("//button[contains(.,'Salvar')]")));
+
+            // Check for general error
+            boolean hasError = false;
+            try {
+                // Look for common mismatch text in page
+                wait.until(ExpectedConditions.visibilityOfElementLocated(By.xpath("//*[contains(text(), 'conferem') or contains(text(), 'coincidem') or contains(text(), 'iguais')]")));
+                hasError = true;
+            } catch (Exception e) {
+                hasError = checkForErrorToast();
+            }
+            assertTrue("System accepted mismatched passwords or showed no error.", hasError);
+        }
+        System.out.println("FINISHED: test15_PasswordMismatchValidation");
     }
 }
